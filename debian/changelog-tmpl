@@ -1,0 +1,5 @@
+python-gmusicapi (1.0-0~{{ release }}) {{ release }}; urgency=low
+
+  * Start packaging
+
+ -- Vladimir Iakovlev <nvbn.rm@gmail.com>  Sat, 03 Mar 2013 16:57:34 +0400

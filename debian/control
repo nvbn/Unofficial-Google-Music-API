@@ -1,0 +1,15 @@
+Source: python-gmusicapi
+Section: net
+Priority: optional
+Maintainer: Vladimir Iakovlev <nvbn.rm@gmail.com>
+Build-Depends: cdbs (>= 0.4.49), debhelper (>= 7), python (>= 2.4), python-support,  python2.7, python-setuptools, python-decorator, python-protobuf, python-mutagen
+Standards-Version: 3.9.2
+Homepage: https://github.com/nvbn/Unofficial-Google-Music-API
+#Vcs-Git: git://git.debian.org/collab-maint/terminator.git
+#Vcs-Browser: http://git.debian.org/?p=collab-maint/terminator.git;a=summary
+
+Package: python-gmusicapi
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, python-support,  python2.7, python-setuptools, python-decorator, python-protobuf, python-mutagen
+Description: An unofficial api for Google Music. 
+
