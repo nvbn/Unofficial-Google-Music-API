@@ -41,18 +41,7 @@ setup(
     description='An unofficial api for Google Play Music.',
     long_description=(open('README.rst').read() + '\n\n' +
                       open('HISTORY.rst').read()),
-    install_requires=[
-        'validictory == 0.9.0',
-        'decorator == 3.3.2',
-        'mutagen == 1.21',
-        'protobuf == 2.4.1',
-        'requests == 1.1.0',
-        'python-dateutil == 2.1',
-        #for testing album art:
-        #'hachoir-core == 1.3.3',
-        #'hachoir-parser == 1.3.4',
-        #'hachoir-metadata == 1.3.3',
-    ] + dynamic_requires,
+    install_requires=[],
     classifiers=[
         'Programming Language :: Python',
         'Programming Language :: Python :: 2.7',
