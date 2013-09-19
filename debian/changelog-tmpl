@@ -1,3 +1,9 @@
+python-gmusicapi (2.0-0~{{ release }}) {{ release }}; urgency=low
+
+  * Update package
+
+ -- Vladimir Iakovlev <nvbn.rm@gmail.com>  Thu, 19 Sep 2013 12:15:10 +0400
+
 python-gmusicapi (1.0-0~{{ release }}) {{ release }}; urgency=low
 
   * Start packaging
