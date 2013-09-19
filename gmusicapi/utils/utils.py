@@ -1,17 +1,28 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """Utility functions used across api code."""
 
+import errno
+import functools
+import inspect
 import logging
+import os
+import re
 import subprocess
+import time
+import traceback
 
 from decorator import decorator
 from google.protobuf.descriptor import FieldDescriptor
 
 from gmusicapi import __version__
+from gmusicapi.compat import my_appdirs
+from gmusicapi.exceptions import CallFailure
 
-log = logging.getLogger(__name__)
+# this controls the crazy logging setup that checks the callstack;
+#  it should be monkey-patched to False after importing to disable it.
+# when False, static code will simply log in the standard way under the root.
+per_client_logging = True
 
 #Map descriptor.CPPTYPE -> python type.
 _python_to_cpp_types = {
@@ -27,43 +38,287 @@ cpp_type_to_python = dict(
     for cpp in cpplist
 )
 
-root_logger_name = "gmusicapi"
-log_filename = "gmusicapi.log"
+log_filepath = os.path.join(my_appdirs.user_log_dir, 'gmusicapi.log')
+printed_log_start_message = False  # global, set in config_debug_logging
 
-#set to True after configure_debug_logging is called to prevent
-# setting up more than once
-log_already_configured_flag = '_gmusicapi_debug_logging_setup'
+# matches a mac address in GM form, eg
+#   00:11:22:33:AA:BB
+_mac_pattern = re.compile("^({pair}:){{5}}{pair}$".format(pair='[0-9A-F]' * 2))
 
 
-def configure_debug_logging():
-    """Warnings and above to terminal, below to gmusicapi.log.
+class DynamicClientLogger(object):
+    """Dynamically proxies to the logger of a Client higher in the call stack.
+
+    This is a ridiculous hack needed because
+    logging is, in the eyes of a user, per-client.
+
+    So, logging from static code (eg protocol, utils) needs to log using the
+    config of the calling client's logger.
+
+    There can be multiple clients, so we can't just use a globally-available
+    logger.
+
+    Instead of refactoring every function to receieve a logger, we introspect
+    the callstack at runtime to figure out who's calling us, then use their
+    logger.
+
+    This probably won't work on non-CPython implementations.
+    """
+
+    def __init__(self, caller_name):
+        self.caller_name = caller_name
+
+    def __getattr__(self, name):
+        # this isn't a totally foolproof way to proxy, but it's fine for
+        # the usual logger.debug, etc methods.
+
+        logger = logging.getLogger(self.caller_name)
+
+        if per_client_logging:
+            # search upwards for a client instance
+            for frame_rec in inspect.getouterframes(inspect.currentframe()):
+                frame = frame_rec[0]
+
+                try:
+                    if 'self' in frame.f_locals:
+                        f_self = frame.f_locals['self']
+
+                        # can't import and check against classes; that causes an import cycle
+                        if ((f_self is not None and
+                             f_self.__module__.startswith('gmusicapi.clients') and
+                             f_self.__class__.__name__ in ('Musicmanager', 'Webclient',
+                                                           'Mobileclient'))):
+                            logger = f_self.logger
+                            break
+                finally:
+                    del frame  # avoid circular references
+
+            else:
+                # log to root logger.
+                # should this be stronger? There's no default root logger set up.
+                stack = traceback.extract_stack()
+                logger.info('could not locate client caller in stack:\n%s',
+                            '\n'.join(traceback.format_list(stack)))
+
+        return getattr(logger, name)
+
+
+log = DynamicClientLogger(__name__)
+
+
+def datetime_to_microseconds(dt):
+    """Return microseconds since epoch, as an int.
+
+    :param dt: a datetime.datetime
+
+    """
+    return int(time.mktime(dt.timetuple()) * 1000000)
+
+
+def is_valid_mac(mac_string):
+    """Return True if mac_string is of form
+    eg '00:11:22:33:AA:BB'.
+    """
+    if not _mac_pattern.match(mac_string):
+        return False
+
+    return True
+
+
+def create_mac_string(num, splitter=':'):
+    """Return the mac address interpretation of num,
+    in the form eg '00:11:22:33:AA:BB'.
+
+    :param num: a 48-bit integer (eg from uuid.getnode)
+    :param spliiter: a string to join the hex pairs with
+    """
+
+    mac = hex(num)[2:]
+
+    # trim trailing L for long consts
+    if mac[-1] == 'L':
+        mac = mac[:-1]
+
+    pad = max(12 - len(mac), 0)
+    mac = '0' * pad + mac
+    mac = splitter.join([mac[x:x + 2] for x in range(0, 12, 2)])
+    mac = mac.upper()
+
+    return mac
+
+
+# from http://stackoverflow.com/a/5032238/1231454
+def make_sure_path_exists(path, mode=None):
+    try:
+        if mode is not None:
+            os.makedirs(path, mode)
+        else:
+            os.makedirs(path)
+
+    except OSError as exception:
+        if exception.errno != errno.EEXIST:
+            raise
+
+
+# from http://stackoverflow.com/a/8101118/1231454
+class DocstringInheritMeta(type):
+    """A variation on
+    http://groups.google.com/group/comp.lang.python/msg/26f7b4fcb4d66c95
+    by Paul McGuire
+    """
+
+    def __new__(meta, name, bases, clsdict):
+        if not('__doc__' in clsdict and clsdict['__doc__']):
+            for mro_cls in (mro_cls for base in bases for mro_cls in base.mro()):
+                doc = mro_cls.__doc__
+                if doc:
+                    clsdict['__doc__'] = doc
+                    break
+        for attr, attribute in clsdict.items():
+            if not attribute.__doc__:
+                for mro_cls in (mro_cls for base in bases for mro_cls in base.mro()
+                                if hasattr(mro_cls, attr)):
+                    doc = getattr(getattr(mro_cls, attr), '__doc__')
+                    if doc:
+                        attribute.__doc__ = doc
+                        break
+        return type.__new__(meta, name, bases, clsdict)
+
+
+def dual_decorator(func):
+    """This is a decorator that converts a paramaterized decorator for no-param use.
+
+    source: http://stackoverflow.com/questions/3888158.
+    """
+    @functools.wraps(func)
+    def inner(*args, **kw):
+        if ((len(args) == 1 and not kw and callable(args[0])
+             and not (type(args[0]) == type and issubclass(args[0], BaseException)))):
+            return func()(args[0])
+        else:
+            return func(*args, **kw)
+    return inner
+
+
+@dual_decorator
+def enforce_id_param(position=1):
+    """Verifies that the caller is passing a single song id, and not
+    a song dictionary.
+
+    :param position: (optional) the position of the expected id - defaults to 1.
+    """
+
+    @decorator
+    def wrapper(function, *args, **kw):
+
+        if not isinstance(args[position], basestring):
+            raise ValueError("Invalid param type in position %s;"
+                             " expected a song id (did you pass a song dictionary?)" % position)
+
+        return function(*args, **kw)
+
+    return wrapper
+
+
+@dual_decorator
+def enforce_ids_param(position=1):
+    """Verifies that the caller is passing a list of song ids, and not a
+    list of song dictionaries.
+
+    :param position: (optional) the position of the expected list - defaults to 1.
+    """
+
+    @decorator
+    def wrapper(function, *args, **kw):
+
+        if ((not isinstance(args[position], (list, tuple)) or
+             not all([isinstance(e, basestring) for e in args[position]]))):
+            raise ValueError("Invalid param type in position %s;"
+                             " expected song ids (did you pass song dictionaries?)" % position)
+
+        return function(*args, **kw)
+
+    return wrapper
+
+
+def configure_debug_log_handlers(logger):
+    """Warnings and above to stderr, below to gmusicapi.log when possible.
     Output includes line number."""
 
-    root_logger = logging.getLogger('gmusicapi')
+    global printed_log_start_message
 
-    if not getattr(root_logger, 'log_already_configured_flag', None):
-        root_logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
 
-        fh = logging.FileHandler(log_filename)
-        fh.setLevel(logging.DEBUG)
+    logging_to_file = True
+    try:
+        make_sure_path_exists(os.path.dirname(log_filepath), 0o700)
+        debug_handler = logging.FileHandler(log_filepath)
+    except OSError:
+        logging_to_file = False
+        debug_handler = logging.StreamHandler()
 
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.WARNING)
+    debug_handler.setLevel(logging.DEBUG)
 
-        root_logger.addHandler(fh)
-        root_logger.addHandler(ch)
+    important_handler = logging.StreamHandler()
+    important_handler.setLevel(logging.WARNING)
 
+    logger.addHandler(debug_handler)
+    logger.addHandler(important_handler)
+
+    if not printed_log_start_message:
         #print out startup message without verbose formatting
-        root_logger.info("!-- begin debug log --!")
-        root_logger.info("version: " + __version__)
+        logger.info("!-- begin debug log --!")
+        logger.info("version: " + __version__)
+        if logging_to_file:
+            logger.info("logging to: " + log_filepath)
 
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s (%(lineno)s) [%(levelname)s]: %(message)s'
-        )
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
+        printed_log_start_message = True
 
-        setattr(root_logger, 'log_already_configured_flag', True)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s (%(module)s:%(lineno)s) [%(levelname)s]: %(message)s'
+    )
+    debug_handler.setFormatter(formatter)
+    important_handler.setFormatter(formatter)
+
+
+@dual_decorator
+def retry(retry_exception=None, tries=6, delay=2, backoff=2, logger=None):
+    """Retry calling the decorated function using an exponential backoff.
+
+    An exception from a final attempt will propogate.
+
+    :param retry_exception: exception (or tuple of exceptions) to check for and retry on.
+      If None, use (AssertionError, CallFailure).
+    :param tries: number of times to try (not retry) before giving up
+    :param delay: initial delay between retries in seconds
+    :param backoff: backoff multiplier
+    :param logger: logger to use. If None, use 'gmusicapi.utils' logger
+
+    Modified from
+    http://www.saltycrane.com/blog/2009/11/trying-out-retry-decorator-python.
+    """
+
+    if logger is None:
+        logger = logging.getLogger('gmusicapi.utils')
+
+    if retry_exception is None:
+        retry_exception = (AssertionError, CallFailure)
+
+    @decorator
+    def retry_wrapper(f, *args, **kwargs):
+        mtries, mdelay = tries, delay  # make our own mutable copies
+        while mtries > 1:
+            try:
+                return f(*args, **kwargs)
+            except retry_exception as e:
+                logger.info("%s, retrying in %s seconds...", e, mdelay)
+
+                time.sleep(mdelay)
+                mtries -= 1
+                mdelay *= backoff
+        return f(*args, **kwargs)
+
+    return retry_wrapper
 
 
 def pb_set(msg, field_name, val):
@@ -199,6 +454,7 @@ def truncate(x, max_els=100, recurse_levels=0):
     return x
 
 
+@dual_decorator
 def empty_arg_shortcircuit(return_code='[]', position=1):
     """Decorate a function to shortcircuit and return something immediately if
     the length of a positional arg is 0.

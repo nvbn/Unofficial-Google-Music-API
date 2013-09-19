@@ -1,18 +1,41 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """Definitions shared by multiple clients."""
 
+from collections import namedtuple
 import sys
 
 from google.protobuf.descriptor import FieldDescriptor
-from requests import Request
 
+import gmusicapi
 from gmusicapi.compat import json
-from gmusicapi.exceptions import ParseException
+from gmusicapi.exceptions import (
+    CallFailure, ParseException, ValidationException,
+)
+from gmusicapi.utils import utils
 
-#There's a lot of code here to simplify call definition, but it's not scary - promise.
-#Request objects are currently requests.Request; see http://docs.python-requests.org
+import requests
+
+log = utils.DynamicClientLogger(__name__)
+
+_auth_names = ('xt', 'sso', 'oauth')
+
+"""
+  AuthTypes has fields for each type of auth, each of which store a bool:
+    xt: webclient xsrf param/cookie
+    sso: webclient Authorization header
+    oauth: musicmanager oauth header
+"""
+AuthTypes = namedtuple('AuthTypes', _auth_names)
+
+
+def authtypes(**kwargs):
+    """Convinience factory for AuthTypes that defaults authtypes to False."""
+    for name in _auth_names:
+        if name not in kwargs:
+            kwargs[name] = False
+
+    return AuthTypes(**kwargs)
 
 
 class BuildRequestMeta(type):
@@ -23,7 +46,7 @@ class BuildRequestMeta(type):
         new_cls = super(BuildRequestMeta, cls).__new__(cls, name, bases, dct)
 
         merge_keys = ('headers', 'params')
-        all_keys = ('method', 'url', 'files', 'data') + merge_keys
+        all_keys = ('method', 'url', 'files', 'data', 'verify', 'allow_redirects') + merge_keys
 
         config = {}  # stores key: val for static or f(*args, **kwargs) -> val for dyn
         dyn = lambda key: 'dynamic_' + key
@@ -42,7 +65,7 @@ class BuildRequestMeta(type):
 
         for key in merge_keys:
             #merge case: dyn took precedence above, but stat also exists
-            if dyn(key) in config and has_key(stat(key)):
+            if has_key(dyn(key)) and has_key(stat(key)):
                 def key_closure(stat_val=get_key(stat(key)), dyn_func=get_key(dyn(key))):
                     def build_key(*args, **kwargs):
                         dyn_val = dyn_func(*args, **kwargs)
@@ -65,7 +88,7 @@ class BuildRequestMeta(type):
 
                     req_kwargs[key] = val
 
-                return Request(**req_kwargs)
+                return req_kwargs
             return build_request
 
         new_cls.build_request = classmethod(req_closure())
@@ -75,57 +98,38 @@ class BuildRequestMeta(type):
 
 class Call(object):
     """
-    The client Call interface is:
-
-     req = SomeCall.build_request(some, params)
-     prep_req = req.prepare()
-     response = <requests.Session.send(prep_req)>
-
-     try:
-         msg = SomeCall.parse_response(response)
-     except ParseException
-         ...
-
-     try:
-         SomeCall.validate(msg)
-         SomeCall.check_success(msg)
-     except ValidationException:
-         ...
-     except CallFailure:
-         ...
-
-     #msg is python data, the call succeeded, and the response was formatted as expected
-
+    Clients should use Call.perform().
 
     Calls define how to build their requests through static and dynamic data.
     For example, a request might always send some user-agent: this is static.
     Or, it might need the name of a song to modify: this is dynamic.
 
-    Possible values to use in the request are:
+    Specially named fields define the data, and correspond with requests.Request kwargs:
         method: eg 'GET' or 'POST'
         url: string
-        headers (m): dictionary
         files: dictionary of {filename: fileobject} files to multipart upload.
         data: the body of the request
                 If a dictionary is provided, form-encoding will take place.
                 A string will be sent as-is.
+        verify: if True, verify SSL certs
         params (m): dictionary of URL parameters to append to the URL.
+        headers (m): dictionary
 
-    Calls can define them statically:
+    Static data shold prepends static_ to a field:
         class SomeCall(Call):
             static_url = 'http://foo.com/thiscall'
 
-    Or dynamically:
+    And dynamic data prepends dynamic_ to a method:
         class SomeCall(Call):
-            #this takes whatever params are needed (ie not necessarily something called endpoint)
-            #*args, **kwargs are passed from SomeCall.build_request
+            #*args, **kwargs are passed from SomeCall.build_request (and Call.perform)
             def dynamic_url(endpoint):
                 return 'http://foo.com/' + endpoint
 
     Dynamic data takes precedence over static if both exist,
      except for attributes marked with (m) above. These get merged, with dynamic overriding
-     on key conflicts (though this really shouldn't be relied on).
-    Here's an example that has static and dynamic headers:
+     on key conflicts (though all this really shouldn't be relied on).
+
+    Here's a contrived example that merges static and dynamic headers:
         class SomeCall(Call):
             static_headers = {'user-agent': "I'm totally a Google client!"}
 
@@ -133,19 +137,10 @@ class Call(object):
             def dynamic_headers(cls, keep_alive=False):
                 return {'Connection': keep_alive}
 
-    If neither is defined, the param is not passed to the Request when creating it.
+    If neither a static nor dynamic member is defined,
+    the param is not used to create the requests.Request.
 
-
-    There's three static bool fields to declare what auth the session should send:
-        send_xt: param/cookie xsrf token
-
-     AND/OR
-
-        send_clientlogin: google clientlogin cookies
-     OR
-        send_sso: google SSO (authtoken) cookies
-
-    session_options can also be set to a dict of kwargs to pass to requests.Session.send.
+    Calls declare the kind of auth they require with an AuthTypes object named required_auth.
 
     Calls must define parse_response.
     Calls can also define filter_response, validate and check_success.
@@ -155,10 +150,9 @@ class Call(object):
 
     __metaclass__ = BuildRequestMeta
 
-    send_xt = False
-    send_clientlogin = False
-    send_sso = False
-    session_options = {}
+    gets_logged = True
+
+    required_auth = authtypes()  # all false by default
 
     @classmethod
     def parse_response(cls, response):
@@ -166,11 +160,21 @@ class Call(object):
         raise NotImplementedError
 
     @classmethod
-    def validate(cls, msg):
+    def validate(cls, response, msg):
+        """Raise ValidationException on problems.
+
+        :param response: a requests.Response
+        :param msg: the result of parse_response on response
+        """
         pass
 
     @classmethod
-    def check_success(cls, msg):
+    def check_success(cls, response, msg):
+        """Raise CallFailure on problems.
+
+        :param response: a requests.Response
+        :param msg: the result of parse_response on response
+        """
         pass
 
     @classmethod
@@ -179,9 +183,92 @@ class Call(object):
         return msg  # default to identity
 
     @classmethod
-    def get_auth(cls):
-        """Return a 3-tuple send (xt, clientlogin, sso)."""
-        return (cls.send_xt, cls.send_clientlogin, cls.send_sso)
+    def perform(cls, session, validate, *args, **kwargs):
+        """Send, parse, validate and check success of this call.
+        *args and **kwargs are passed to protocol.build_transaction.
+
+        :param session: a PlaySession used to send this request.
+        :param validate: if False, do not validate
+        """
+        #TODO link up these docs
+
+        call_name = cls.__name__
+
+        if cls.gets_logged:
+            log.debug("%s(args=%s, kwargs=%s)",
+                      call_name,
+                      [utils.truncate(a) for a in args],
+                      dict((k, utils.truncate(v)) for (k, v) in kwargs.items())
+                      )
+        else:
+            log.debug("%s(<omitted>)", call_name)
+
+        req_kwargs = cls.build_request(*args, **kwargs)
+
+        response = session.send(req_kwargs, cls.required_auth)
+        #TODO trim the logged response if it's huge?
+
+        safe_req_kwargs = req_kwargs.copy()
+        if safe_req_kwargs.get('headers', {}).get('Authorization', None) is not None:
+            safe_req_kwargs['headers']['Authorization'] = '<omitted>'
+
+        # check response code
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            err_msg = str(e)
+
+            if cls.gets_logged:
+                err_msg += "\n(requests kwargs: %r)" % (safe_req_kwargs)
+                err_msg += "\n(response was: %r)" % response.content
+
+            raise CallFailure(err_msg, call_name)
+
+        try:
+            parsed_response = cls.parse_response(response)
+        except ParseException:
+            err_msg = ("the server's response could not be understood."
+                       " The call may still have succeeded, but it's unlikely.")
+            if cls.gets_logged:
+                err_msg += "\n(requests kwargs: %r)" % (safe_req_kwargs)
+                err_msg += "\n(response was: %r)" % response.content
+                log.exception("could not parse %s response: %r", call_name, response.content)
+            else:
+                log.exception("could not parse %s response: (omitted)", call_name)
+
+            raise CallFailure(err_msg, call_name)
+
+        if cls.gets_logged:
+            log.debug(cls.filter_response(parsed_response))
+
+        try:
+            #order is important; validate only has a schema for a successful response
+            cls.check_success(response, parsed_response)
+            if validate:
+                cls.validate(response, parsed_response)
+        except CallFailure:
+            raise
+        except ValidationException as e:
+            #TODO shouldn't be using formatting
+            err_msg = "the response format for %s was not recognized." % call_name
+            err_msg += "\n\n%s\n" % e
+
+            if cls.gets_logged:
+                raw_response = response.content
+
+                if len(raw_response) > 1000:
+                    raw_response = raw_response[:1000] + '...'
+
+                err_msg += ("\nFirst, try the develop branch."
+                            " If you can recreate this error with the most recent code"
+                            " please [create an issue](http://goo.gl/qbAW8) that includes"
+                            " the above ValidationException"
+                            " and the following request/response:\n%r\n\n%r\n"
+                            "\nA traceback follows:\n") % (safe_req_kwargs, raw_response)
+
+            log.exception(err_msg)
+
+        return parsed_response
 
     @staticmethod
     def _parse_json(text):
@@ -230,3 +317,66 @@ class Call(object):
                                   for f in old_fields])
 
         return filtered
+
+
+class ClientLogin(Call):
+    """Performs `Google ClientLogin
+    <https://developers.google.com/accounts/docs/AuthForInstalledApps#ClientLogin>`__."""
+
+    gets_logged = False
+
+    static_method = 'POST'
+    #static_headers = {'User-agent': 'Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1'}
+    static_url = 'https://www.google.com/accounts/ClientLogin'
+
+    @classmethod
+    def dynamic_data(cls, Email, Passwd, accountType='HOSTED_OR_GOOGLE',
+                     service='sj', source=None,
+                     logintoken=None, logincaptcha=None):
+        """Params align with those in the actual request.
+
+        If *source* is ``None``, ``'gmusicapi-<version>'`` is used.
+
+        Captcha requests are not yet implemented.
+        """
+        if logintoken is not None or logincaptcha is not None:
+            raise ValueError('ClientLogin captcha handling is not yet implemented.')
+
+        if source is None:
+            source = 'gmusicapi-' + gmusicapi.__version__
+
+        return dict(
+            (name, val) for (name, val) in locals().items()
+            if name in set(('Email', 'Passwd', 'accountType', 'service', 'source',
+                            'logintoken', 'logincaptcha'))
+        )
+
+    @classmethod
+    def parse_response(cls, response):
+        """Return a dictionary of response key/vals.
+
+        A successful login will have SID, LSID, and Auth keys.
+        """
+
+        # responses are formatted as, eg:
+        #    SID=DQAAAGgA...7Zg8CTN
+        #    LSID=DQAAAGsA...lk8BBbG
+        #    Auth=DQAAAGgA...dk3fA5N
+        # or:
+        #    Url=http://www.google.com/login/captcha
+        #    Error=CaptchaRequired
+        #    CaptchaToken=DQAAAGgA...dkI1LK9
+        #    CaptchaUrl=Captcha?ctoken=HiteT...
+
+        ret = {}
+        for line in response.text.split('\n'):
+            if '=' in line:
+                var, val = line.split('=', 1)
+                ret[var] = val
+
+        return ret
+
+    @classmethod
+    def check_succes(cls, response, msg):
+        if response.status_code == 200:
+            raise CallFailure("status code %s != 200" % response.status_code, cls.__name__)

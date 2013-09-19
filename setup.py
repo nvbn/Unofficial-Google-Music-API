@@ -1,11 +1,12 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 import re
 from setuptools import setup, find_packages
 import sys
 
 #Only 2.6-2.7 are supported.
-if not ((2, 6, 0) <= sys.version_info[:3] <= (2, 7, 3)):
+if not ((2, 6, 0) <= sys.version_info[:3] <= (2, 7, 5)):
     sys.stderr.write('gmusicapi does not officially support this Python version.\n')
     #try to continue anyway
 

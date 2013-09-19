@@ -3,10 +3,59 @@
 History
 -------
 
-As of 2013.02.09, releases with breaking changes will be noted with ``**``.
+As of 1.0.0, `semantic versioning <http://semver.org/>`__ is used.
+
+2.0.0
++++++++++
+released 2013-08-01
+
+- remove broken Webclient.{create_playlist, change_playlist, copy_playlist, search, change_playlist_name}
+- add Mobileclient; this will slowly replace most of the Webclient, so prefer it when possible
+- add support for streaming All Access songs
+- add Webclient.get_registered_devices
+- add a toggle to turn off validation per client
+- raise an exception when a song dictionary is passed instead of an id
+
+1.2.0
++++++
+released 2013-05-16
+
+- add support for listing/downloading songs with the Musicmanager.
+  When possible, this should be preferred to the Webclient's method, since
+  it does not have a download quota.
+- fix a bug where the string representing a machine's mac 
+  was not properly formed for use as an uploader_id.
+  This will cause another machine to be registered for some users;
+  the old device can be identified from its lack of a version number.
+- verify user-provided uploader_ids
+
+1.1.0
++++++
+released 2013-04-19
+
+- get_all_songs can optionally return a generator
+- compatibility updates for AddPlaylist call
+- log to appdirs.user_log_dir by default
+- add open_browser param to perform_oauth
+
+1.0.0
++++++
+released 2013-04-02
+
+- breaking: Api has been split into Webclient and Musicmanager
+- breaking: semantic versioning (previous versions removed from PyPi)
+- Music Manager OAuth support
+- faster uploading when matching is disabled
+- faster login
+
+2013.03.04
+++++++++++
+
+- add artistMatchedId to metadata
+- tests are no longer a mess
 
 2013.02.27
-**********
+++++++++++
 
 - add support for uploading album art (`docs
   <https://unofficial-google-music-api.readthedocs.org/en/
@@ -20,7 +69,7 @@ As of 2013.02.09, releases with breaking changes will be noted with ``**``.
 - improved error messages when uploading
 
 2013.02.15
-**********
+++++++++++
 
 - user now controls logging (`docs
   <https://unofficial-google-music-api.readthedocs.org/en/
@@ -44,8 +93,8 @@ As of 2013.02.09, releases with breaking changes will be noted with ``**``.
 - improve handling of strange metadata when uploading
 - add a dependency on `dateutil <http://labix.org/python-dateutil>`__
 
-``**`` 2013.02.09
-+++++++++++++++++
+2013.02.09
+++++++++++
 
 - breaking: upload returns a 3-tuple (`docs
   <https://unofficial-google-music-api.readthedocs.org/en

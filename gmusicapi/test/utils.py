@@ -1,23 +1,19 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """Utilities used in testing."""
 
-from getpass import getpass
-import inspect
 import logging
 import numbers
 import os
-import random
 import re
-import sys
-from gmusicapi.compat import unittest
 
-from gmusicapi.api import Api
-from gmusicapi.exceptions import CallFailure, NotLoggedIn
+
+#from gmusicapi.api import Api
 from gmusicapi.protocol.metadata import md_expectations
+from gmusicapi.utils import utils
 
-log = logging.getLogger(__name__)
+log = utils.DynamicClientLogger(__name__)
+
 
 #A regex for the gm id format, eg:
 #c293dd5a-9aa9-33c4-8b09-0c865b56ce46
@@ -26,8 +22,16 @@ gm_id_regex = re.compile(("{h}{{8}}-" +
                          ("{h}{{4}}-" * 3) +
                          "{h}{{12}}").format(h=hex_set))
 
-travis_id = 'E9:40:01:0E:51:7A'
-travis_name = 'Travis-CI (gmusicapi)'
+#Get the absolute paths of the test files, which are located in the same
+# directory as this file.
+cwd = os.getcwd()
+test_file_dir = os.path.dirname(os.path.abspath(__file__))
+
+small_mp3 = os.path.join(test_file_dir, u'audiotest_small.mp3')
+image_filename = os.path.join(test_file_dir, u'imagetest_10x10_check.png')
+
+# that dumb intro track on conspiracy of one
+aa_song_id = 'Tqqufr34tuqojlvkolsrwdwx7pe'
 
 
 class NoticeLogging(logging.Handler):
@@ -43,45 +47,16 @@ class NoticeLogging(logging.Handler):
         self.seen_message = True
 
 
-def init():
-    """Makes an instance of the unit-tested api and attempts to login with it.
-    Returns the authenticated api.
+def new_test_client(cls, **kwargs):
+    """Make an instance of a client, login, and return it.
 
-    This also detects if we're running on Travis, and if so, uses the environ for auth.
+    kwargs are passed through to cls.login().
     """
 
-    api = UnitTestedApi(debug_logging=True)
+    client = cls(debug_logging=True)
+    client.login(**kwargs)
 
-    #Attempt to get auth from environ.
-    user, passwd = os.environ.get('GMUSICAPI_TEST_USER'), os.environ.get('GMUSICAPI_TEST_PASSWD')
-
-    if os.environ.get('TRAVIS'):
-        if not (user and passwd):
-            print 'on Travis but could not read auth from environ; quitting.'
-            sys.exit(1)
-
-        #Travis runs on VMs with no "real" mac - we have to provide one.
-        api.login(user, passwd, uploader_id=travis_id, uploader_name=travis_name)
-        return api
-
-    if user and passwd:
-        api.login(user, passwd)
-        return api
-
-    #Prompt user for login.
-    logged_in = False
-    attempts = 0
-
-    print "Warning: this test suite _might_ modify the library it is run on."
-
-    while not logged_in and attempts < 3:
-        email = raw_input("Email: ")
-        passwd = getpass()
-
-        logged_in = api.login(email, passwd)
-        attempts += 1
-
-    return api
+    return client
 
 
 def modify_md(md_name, val):
@@ -146,114 +121,4 @@ def is_id_list(lst):
 def is_id_pair_list(lst):
     """Returns True if the given list is made up of all (id, id) pairs."""
     a, b = zip(*lst)
-    return is_id_list(a+b)
-
-
-class enforced(object):
-    """A callable that enforces the return of a function with a predicate."""
-    def __init__(self, pred):
-        self.pred = pred
-
-    def __call__(self, f):
-        def wrapped_f(*args, **kwargs):
-            res = f(*args, **kwargs)
-            if not self.pred(res):
-                raise AssertionError  # bad return format
-            return res
-        return wrapped_f
-
-#Return information for most api member functions.
-returns_id = ("change_playlist_name",
-              "create_playlist",
-              "delete_playlist",
-              "copy_playlist",
-              "change_playlist")
-
-returns_id_list = ("change_song_metadata",
-                   "delete_songs")
-
-returns_songs = ("get_all_songs",
-                 "get_playlist_songs")
-
-returns_id_pairs = ("add_songs_to_playlist",
-                    "remove_songs_from_playlist")
-fname_to_pred = {}
-
-for fnames, pred in ((returns_id, is_gm_id),
-                     (returns_id_list, is_id_list),
-                     (returns_songs, is_song_list),
-                     (returns_id_pairs, is_id_pair_list)):
-    for fname in fnames:
-        fname_to_pred[fname] = pred
-
-
-class UnitTestedApi(Api):
-    """An Api, with most functions wrapped to assert a proper return."""
-
-    def __getattribute__(self, name):
-        orig = object.__getattribute__(self, name)
-        #Enforce any name in the lists above with the right pred.
-        if name in fname_to_pred:
-            return enforced(fname_to_pred[name])(orig)
-        else:
-            return orig
-
-
-class BaseTest(unittest.TestCase):
-    """Abstract class providing some useful features for testing the api."""
-
-    @classmethod
-    def setUpClass(cls):
-        """Init and log in to an api, then get the library and playlists."""
-
-        cls.api = init()
-
-        if not cls.api.is_authenticated():
-            raise NotLoggedIn
-
-        #These are assumed to succeed, but errors here will prevent further testing.
-        cls.library = cls.api.get_all_songs()
-
-        #I can't think of a way to test auto playlists and instant mixes.
-        cls.playlists = cls.api.get_all_playlist_ids()['user']
-
-    @classmethod
-    def tearDownClass(cls):
-        """Log out of the api."""
-
-        cls.api.logout()
-
-    def setUp(self):
-        """Get a random song id."""
-
-        #This will fail if we have no songs.
-        self.r_song_id = random.choice(self.library)['id']
-
-    #---
-    #   Utility functions:
-    #---
-
-    def collect_steps(self, prefix):
-        """Yields the steps of a monolithic test in name-sorted order."""
-
-        methods = inspect.getmembers(self, predicate=inspect.ismethod)
-
-        #Sort functions based on name.
-        for name, func in sorted(methods, key=lambda m: m[0]):
-            if name.startswith(prefix):
-                yield name, func
-
-    def run_steps(self, prefix):
-        """Run the steps defined by this prefix in order."""
-
-        for name, step in self.collect_steps(prefix):
-            try:
-                step()
-
-            #Only catch exceptions raised from _our_ test code.
-            #Other kinds of exceptions may be raised inside the code
-            # being tested; those should be re-raised so we can trace them.
-            except CallFailure as f:
-                raise self.fail("test {} step {} failure: {}".format(prefix, step, f))
-            except AssertionError:
-                raise  # reraise so we can track down what went wrong
+    return is_id_list(a + b)

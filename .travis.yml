@@ -6,15 +6,20 @@ python:
 install:
  - python setup.py sdist --formats=zip -k
  - find ./dist -iname "*.zip" -print0 | xargs -0 pip install
-script: python -m gmusicapi.test.integration_test_api
+script: "python -m gmusicapi.test.run_tests"
 before_install: 
 - sudo apt-get update -qq
 - sudo apt-get install -qq libav-tools libavcodec-extra-53
+after_failure: "cat `python -c 'from gmusicapi.utils import utils; print utils.log_filepath'`"
 branches: 
   only: 
   - develop
   - master
+  - mobileclient
 env: 
+  global:
+  - GM_N="Travis-CI (gmusicapi)"
   matrix: 
-  - secure: "g1ZSxQ41otwm7xq2/eK6YtlrNnEZoYe0oEPGlCVf9viyO2QVLzdNwCkc1cMX\nVRrTjMCSxaekyBEFUMvACD/ER5iK68Jj9QllzRPVm43ETD+ZvRpmwFMV2a8D\n9ZoABHrr9KqOUuTN7w0NvsELQR8wkJCZiysJTEU4xkHO6YZPrrA="
-  - secure: "AnkECjTBQ4hrQLAtJDVD51Gq6SuPz5PCM4YocVCNIgrWsTKvcwwIKFY5VxGG\nMBLAj82ivvJiLIEyh5pj1nxvtb5QMw+2gupTmq2ArZ2tWqGkK+UILICs7bum\n+AXxykW19kJ0as9z/l97ujQPoC7YYMQM7bBaS1YKp2JZDR1zIj0="
+  # first is AA, second is not
+  - secure: "De4nJrP5O5uL0kWPYCDmTdsiDTHv7Vuvkv02XdwPOFoGG6sOL1svrJhL3Z+G\n3eMFy3DE69mybFf1gZEb9XdDY3LoOX0oAgkHigh+memrvgw/QzaJYN553kmF\n31ose52SFNmtFZH95cwQg1qkSZZsMXlmPxRq510MVl6SA7j6Pi4="
+  - secure: "aK3s024vOcybRx+Wq7/9tSd9XGJn0LBAuejTWxIiUul0I8sgt/ry7Pc8r0Gv\nXU3a9P/0LOUAYu1hS3/hH3u2oVIgXoEotrm2wC6r8N2R8xE7ZhYVl1Nf0fOK\ns0jy1ebIU+s/yHQmuboe61FT3lfiFRxQm6yJu5/G/D77O4HGuQQ="
